@@ -1,0 +1,199 @@
+---
+layout: page
+title: Abeta impact on the transcriptome - Fig1
+---
+
+```{r options, echo=FALSE}
+library(knitr)
+library(DESeq2)
+library(ggplot2)
+library(clusterProfiler)
+library(ggplot2)
+library(biomaRt)
+library(sva)
+library(org.Rn.eg.db)
+library(dplyr)
+library(ggrepel)
+```
+
+## Directory of reads
+
+```{r messages=FALSE}
+directory <- file.path("rip/counts_stranded/gene/")
+```
+
+
+#Ensembl Annotation
+
+```{r cars}
+if(exists("ensembl")==F){
+ensembl<-useMart("ensembl")}
+if(exists("rat")==F){
+rat<-useDataset("rnorvegicus_gene_ensembl", mart=ensembl)}
+listAttributes(rat)
+rat_genes <- getBM(attributes=c('external_gene_name',"ensembl_gene_id","gene_biotype"), mart = rat)
+rat_genes_go <- getBM(attributes=c('external_gene_name',"ensembl_gene_id", "ensembl_transcript_id","go_id","name_1006", "namespace_1003"), mart = rat)
+for(i in 1:length(rat_genes[,1])){
+  if(rat_genes[i,1]==""){
+    rat_genes[i,1]<-rat_genes[i,2]
+  }
+}
+for(i in 1:length(rat_genes_go[,1])){
+  if(rat_genes_go[i,1]==""){
+    rat_genes_go[i,1]<-rat_genes_go[i,2]
+  }
+}
+```
+
+############################################## Abeta impact on the transcriptome - Pipeline
+
+
+#Sample Table
+
+No differences were found using all files and only the total RNA or not precipitated samples (input RNA-seq). 
+
+```{r}
+sampleFiles <- list.files(directory)
+#sampleFiles <- sampleFiles[grep("Input", sampleFiles)]
+sampleName<-sapply(sampleFiles %>% str_split("_"), "[[", 1)  
+sampleExperiment<-sampleName %>% str_extract("Input|RIP|IgG")
+samplePair <- sampleName %>% str_extract('[0-9]')
+sampleIndividual <- sampleName %>% str_replace("Input|RIP|IgG",'') 
+sampleCondition <- sampleIndividual %>% str_replace('[0-9]+','')
+sampleTable <- data.frame(sampleName = sampleName,
+                          fileName = sampleFiles,
+                          Experiment = sampleExperiment,
+                          Individual = sampleIndividual,
+                          Condition = sampleCondition,
+                          Pair = samplePair)
+sampleTable$Condition <- factor(sampleTable$Condition, levels = c("C", "Ab"))
+sampleTable$Pair <- factor(sampleTable$Pair)
+sampleTable$Experiment <- factor(sampleTable$Experiment, levels = c("Input", "RIP"))
+sampleTable$Individual <- factor(sampleTable$Individual)
+sampleTable
+```
+
+
+# Import Data to DESeq2
+
+```{r}
+dds <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable,
+                                       directory = directory,
+                                       design= ~ Pair + Experiment + Condition + Experiment:Condition)
+rowData(dds)<-rat_genes[match(rownames(dds), rat_genes$ensembl_gene_id),]
+```
+
+#Filter by counts
+
+Expressed > 5 at least in two samples of the three replicates per condition. 
+
+```{r}
+dds_keep<-dds
+keep <- "Values"
+# unevaluated chunk...
+for(i in 1:2){
+  j<-i*3
+  h<-j-2
+  keep_p <- rownames(dds_keep)[rowSums(counts(dds_keep)[,c(h:j)]>= 5)>= 2] 
+  keep <- c(keep, keep_p)
+}
+keep <- keep[-1]
+keep <- unique(keep)
+dds_keep<-dds[keep,]
+```
+
+# Processing DESeq2
+
+```{r}
+dds_keep <- estimateSizeFactors(dds_keep)
+dds_keep <- estimateDispersions(dds_keep)
+dds_keep <- nbinomWaldTest(dds_keep)
+```
+
+
+# Normalization
+
+```{r}
+rld_keep <- rlog(dds_keep, blind=FALSE)
+```
+
+
+# SVA
+
+```{r}
+dat <- counts(dds_keep, normalized=TRUE)
+idx <- rowMeans(dat) > 1
+dat <- dat[idx,]
+mod <- model.matrix(~ Pair + Experiment + Condition + Experiment:Condition, colData(dds_keep))
+mod0 <- model.matrix(~ 1, colData(dds_keep))
+svseq <- svaseq(dat, mod, mod0, n.sv=2)
+```
+
+
+```{r}
+plot(svseq$sv[,1], svseq$sv[,2], col=dds_keep$Pair, pch=16)
+```
+
+Using the surrogate variables in a *DESeq2* analysis:
+
+```{r}
+dds.sva <- dds_keep
+dds.sva$SV1 <- svseq$sv[,1]
+dds.sva$SV2 <- svseq$sv[,2]
+design(dds.sva) <- ~ SV1 + SV2 + Pair + Experiment + Condition + Experiment:Condition 
+dds.sva <- DESeq(dds.sva)
+resultsNames(dds.sva)
+```
+
+# Results
+
+```{r}
+dds.sva<-DESeq(dds.sva)
+res_ab<-results(dds.sva, contrast = list("Condition_Ab_vs_C"), alpha = 0.05)
+```
+
+# Visualization
+
+```{r}
+results<-merge(y=res_ab, x=rowData(dds_keep)[,c("Annotation", "Detailed.Annotation","Nearest.PromoterID","Gene.Name","Gene.Type")], by="row.names", all=F)
+
+ma_plot_data <- results[!is.na(results$padj),] %>% as.data.frame() %>% arrange(desc(padj))
+rownames(ma_plot_data)<-ma_plot_data$Row.names
+up<-length(which(ma_plot_data$padj < 0.05 &  ma_plot_data$log2FoldChange > 0))
+down <-length(which(ma_plot_data$padj < 0.05 &  ma_plot_data$log2FoldChange < 0))
+top_up<-ma_plot_data %>% as.data.frame %>% filter(log2FoldChange > 0) %>% top_n(10, wt = dplyr::desc(padj)) %>% rownames()
+top_down<-ma_plot_data %>% as.data.frame %>% filter(log2FoldChange < 0) %>% top_n(10, wt = dplyr::desc(padj)) %>% rownames()
+ma_plot_data$label<-""
+ma_plot_data[c(top_down,top_up), "label"]<-ma_plot_data[c(top_down,top_up), "Gene.Name"]
+```
+
+Volcano Plot
+
+```{r, fig.width=7, fig.height=7}
+ggplot(as.data.frame(ma_plot_data), aes(x = log2FoldChange, y = -log(pvalue), label = label)) + geom_point(size=4, color = ifelse(ma_plot_data$padj > 0.05, "grey20", ifelse(ma_plot_data$log2FoldChange > 0, "steelblue4", "red4")), alpha = 0.5)+
+  #annotate(geom="label", x=2, y=22, label=paste("◉ ↑ Up", up, collapse = " "), color="steelblue4", size = 7) + annotate(geom="label", x=-2, y=22, label=paste("◉ ↓ Down", down, collapse = " "), color="red4", size = 7) +
+  theme(plot.title = element_text(hjust = 0.5, size = 30),
+        strip.text.x = element_text(size = 25),
+        axis.text = element_text(size = 20),
+        axis.title = element_text(size = 25),
+        legend.key.size = unit(1.5, "cm"),
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 20)) +geom_label_repel(max.overlaps = 100, size = 4)
+```
+
+
+# Gene Ontology Enrichment
+
+
+```{r}
+ego_ab <- enrichGO(gene = results %>% filter(padj < 0.05) %>% pull(external_gene_name),
+                keyType = "ENSEMBL",
+                OrgDb = org.Rn.eg.db, 
+                ont = "ALL", 
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+```
+
+
+

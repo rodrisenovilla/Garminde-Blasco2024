@@ -1,0 +1,189 @@
+---
+layout: page
+title: hnRNP A2 interactome - Fig3
+---
+
+```{r options, echo=FALSE}
+library(knitr)
+library(DESeq2)
+library(ggplot2)
+library(clusterProfiler)
+library(ggplot2)
+library(biomaRt)
+library(sva)
+library(org.Rn.eg.db)
+library(dplyr)
+library(ggrepel)
+```
+
+## Directory of reads
+
+```{r messages=FALSE}
+directory <- file.path("rip/counts_stranded/gene/")
+```
+
+
+#Ensembl Annotation
+
+```{r cars}
+if(exists("ensembl")==F){
+ensembl<-useMart("ensembl")}
+if(exists("rat")==F){
+rat<-useDataset("rnorvegicus_gene_ensembl", mart=ensembl)}
+listAttributes(rat)
+rat_genes <- getBM(attributes=c('external_gene_name',"ensembl_gene_id","gene_biotype"), mart = rat)
+rat_genes_go <- getBM(attributes=c('external_gene_name',"ensembl_gene_id", "ensembl_transcript_id","go_id","name_1006", "namespace_1003"), mart = rat)
+for(i in 1:length(rat_genes[,1])){
+  if(rat_genes[i,1]==""){
+    rat_genes[i,1]<-rat_genes[i,2]
+  }
+}
+for(i in 1:length(rat_genes_go[,1])){
+  if(rat_genes_go[i,1]==""){
+    rat_genes_go[i,1]<-rat_genes_go[i,2]
+  }
+}
+```
+
+
+
+############################################## Interactome hnRNP A2 - Pipeline
+
+# Sample Table
+
+Depending on the interactome desired, run one or other sample table. 
+IgG and IgGAb are the same files, as they are a pool of treated and untreated mock precipitation (IgG), but duplicated for easier reproducibility in this script.
+
+```{r}
+#Sample Table for Control Condition
+
+sampleFiles <- list.files(directory)
+sampleName<-sapply(sampleFiles %>% str_split("_"), "[[", 1)  
+sampleName <- sampleName[-grep("Ab", sampleName)]
+sampleExperiment<-sampleName %>% str_extract("Input|RIP|IgG")
+sampleRIP<-sampleExperiment
+sampleRIP[grep("RIP|IgG",sampleRIP)]<-"yes"
+sampleRIP[grep("Input",sampleRIP)]<-"no"
+samplePair <- sampleName %>% str_extract('[0-9]')
+sampleIndividual <- sampleName %>% str_replace("InputC|RIPC|IgG",'') 
+sampleFiles <- sampleFiles[-grep("Ab", sampleFiles)]
+sampleTable <- data.frame(sampleName = sampleName,
+                          sampleFiles = sampleFiles,
+                          Experiment = sampleExperiment,
+                          RIP=sampleRIP,
+                          Individual = sampleIndividual,
+                          Pair = samplePair)
+sampleTable$Pair <- factor(sampleTable$Pair)
+sampleTable$Experiment <- factor(sampleTable$Experiment, levels = c("Input","IgG", "RIP"))
+sampleTable$RIP <- factor(sampleTable$RIP, levels = c("no", "yes"))
+sampleTable$Individual <- factor(sampleTable$Individual)
+rownames(sampleTable)<-sampleTable$sampleFiles
+```
+
+
+```{r}
+#Sample Table for Abeta Condition
+
+sampleFiles <- list.files(directory)
+sampleName<-sapply(sampleFiles %>% str_split("_"), "[[", 1)  
+sampleName <- sampleName[-grep("C", sampleName)]
+sampleExperiment<-sampleName %>% str_extract("Input|RIP|IgG")
+sampleRIP<-sampleExperiment
+sampleRIP[grep("RIP|IgG",sampleRIP)]<-"yes"
+sampleRIP[grep("Input",sampleRIP)]<-"no"
+samplePair <- sampleName %>% str_extract('[0-9]')
+sampleIndividual <- sampleName %>% str_replace("InputC|RIPC|IgG",'') 
+sampleFiles <- sampleFiles[-grep("Ab", sampleFiles)]
+sampleTable <- data.frame(sampleName = sampleName,
+                          sampleFiles = sampleFiles,
+                          Experiment = sampleExperiment,
+                          RIP=sampleRIP,
+                          Individual = sampleIndividual,
+                          Pair = samplePair)
+sampleTable$Pair <- factor(sampleTable$Pair)
+sampleTable$Experiment <- factor(sampleTable$Experiment, levels = c("Input","IgG", "RIP"))
+sampleTable$RIP <- factor(sampleTable$RIP, levels = c("no", "yes"))
+sampleTable$Individual <- factor(sampleTable$Individual)
+rownames(sampleTable)<-sampleTable$sampleFiles
+```
+
+# Import Data to DESeq2
+
+
+```{r}
+dds <- DESeqDataSetFromHTSeqCount(sampleTable = sampleTable,
+                                       directory = directory,
+                                       design= ~ Pair + Experiment)
+rowData(dds)<-rat_genes[match(rownames(dds), rat_genes$ensembl_gene_id),]
+```
+
+
+#Filter by counts
+
+Expressed > 5 at least in two samples of the three replicates per condition. 
+
+```{r}
+dds_keep<-dds
+keep <- "Values"
+# unevaluated chunk...
+for(i in 1:3){
+  j<-i*3
+  h<-j-2
+  keep_p <- rownames(dds_keep)[rowSums(counts(dds_keep)[,c(h:j)]>= 2)>= 2] 
+  keep <- c(keep, keep_p)
+}
+keep <- keep[-1]
+keep <- unique(keep)
+dds_keep<-dds[keep,]
+```
+
+# Processing DESeq2
+
+```{r}
+dds_keep <- estimateSizeFactors(dds_keep)
+dds_keep <- estimateDispersions(dds_keep)
+dds_keep <- nbinomWaldTest(dds_keep)
+```
+
+
+# Normalization
+
+```{r}
+rld_keep <- rlog(dds_keep, blind=FALSE)
+```
+
+
+# Results
+
+```{r}
+dds_keep<-DESeq(dds_keep)
+res_rip<-results(dds_keep, contrast = list("Experiment_RIP_vs_Input","Experiment_IgG_vs_Input"), alpha = 0.05)
+```
+
+# Visualization
+
+```{r}
+ma_plot_data <- as.data.frame(res_rip)
+ma_plot_data$padj[is.na(ma_plot_data$padj)]<-1
+n<-length(which(ma_plot_data$padj < 0.05 &  ma_plot_data$log2FoldChange > 0))
+ggplot(data = ma_plot_data, aes(x = baseMean, y = log2FoldChange)) +
+  geom_point(color = ifelse(ma_plot_data$padj < 0.05 &  ma_plot_data$log2FoldChange > 0, "steelblue4", "grey20"), alpha = 0.5)+scale_x_log10()+xlab("Log10Mean of Normalized counts") + annotate(geom="label", x=15, y=7.5, label=paste("◉ ↑ RIP-seq", n, collapse = " "),
+              color="steelblue4")
+```
+
+
+# Gene Ontology Enrichment
+
+
+```{r}
+ego_ab <- enrichGO(gene = results %>% filter(padj < 0.05) %>% pull(external_gene_name),
+                keyType = "ENSEMBL",
+                OrgDb = org.Rn.eg.db, 
+                ont = "ALL", 
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+```
+
+
+
