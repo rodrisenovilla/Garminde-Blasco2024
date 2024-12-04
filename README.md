@@ -1,4 +1,4 @@
-# Garminde-Blasco et al, 2024
+# Gaminde-Blasco et al, 2024
 
 Here it is found scripts for the analysis included in Garminde-Blasco et al (2024) (in revision).
 
